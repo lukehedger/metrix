@@ -18,6 +18,7 @@ cargo run --release
 | `→` / `l` | Scroll chart right |
 | `Home` | Jump to earliest day |
 | `End` | Jump to most recent day |
+| `c` | Toggle chart between tokens-per-day and cost-per-day |
 | `q` / `Esc` | Quit |
 
 ## File structure

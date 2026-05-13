@@ -7,11 +7,20 @@ use crate::data::{self, Metrics};
 // App state
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChartView {
+    Tokens,
+    Cost,
+}
+
 pub struct App {
     pub metrics: Metrics,
     /// Flattened daily data for the chart
     pub daily_vec: Vec<(chrono::NaiveDate, crate::data::DayTokens)>,
+    /// Per-day cost in USD, aligned with daily_vec by date.
+    pub daily_cost_vec: Vec<(chrono::NaiveDate, f64)>,
     pub scroll_offset: usize,
+    pub chart_view: ChartView,
 }
 
 impl App {
@@ -21,11 +30,31 @@ impl App {
             .iter()
             .map(|(d, t)| (*d, t.clone()))
             .collect();
+        let daily_cost_vec: Vec<_> = daily_vec
+            .iter()
+            .map(|(d, _)| {
+                let cost = metrics
+                    .daily_model_tokens
+                    .get(d)
+                    .map(data::estimate_daily_cost)
+                    .unwrap_or(0.0);
+                (*d, cost)
+            })
+            .collect();
         Self {
             metrics,
             daily_vec,
+            daily_cost_vec,
             scroll_offset: 0,
+            chart_view: ChartView::Tokens,
         }
+    }
+
+    pub fn toggle_chart_view(&mut self) {
+        self.chart_view = match self.chart_view {
+            ChartView::Tokens => ChartView::Cost,
+            ChartView::Cost => ChartView::Tokens,
+        };
     }
 
     /// Compute how many bars fit in the chart area.
@@ -148,10 +177,15 @@ fn render_body(frame: &mut Frame, area: Rect, app: &App) {
 // ---------------------------------------------------------------------------
 
 fn render_token_chart(frame: &mut Frame, area: Rect, app: &App) {
+    let (base_title, bar_color) = match app.chart_view {
+        ChartView::Tokens => ("Tokens per Day", Color::Cyan),
+        ChartView::Cost => ("Cost per Day", Color::Green),
+    };
+
     if app.daily_vec.is_empty() {
         let msg = Paragraph::new("No data found in ~/.claude/projects/")
             .style(Style::default().fg(Color::Red))
-            .block(Block::bordered().title(" Tokens per Day "));
+            .block(Block::bordered().title(format!(" {} ", base_title)));
         frame.render_widget(msg, area);
         return;
     }
@@ -159,31 +193,44 @@ fn render_token_chart(frame: &mut Frame, area: Rect, app: &App) {
     let visible = app.visible_bars(area.width);
     let start = app.scroll_offset;
     let end = (start + visible).min(app.daily_vec.len());
-    let window = &app.daily_vec[start..end];
 
-    let bars: Vec<Bar> = window
-        .iter()
-        .map(|(date, tokens)| {
-            let total = tokens.total();
+    let bars: Vec<Bar> = (start..end)
+        .map(|i| {
+            let (date, tokens) = &app.daily_vec[i];
             let label = date.format("%b %d").to_string();
-            let value_label = format_tokens_short(total);
-            Bar::default()
-                .value(total)
-                .label(Line::from(label))
-                .text_value(value_label)
-                .style(Style::default().fg(Color::Cyan))
+            match app.chart_view {
+                ChartView::Tokens => {
+                    let total = tokens.total();
+                    Bar::default()
+                        .value(total)
+                        .label(Line::from(label))
+                        .text_value(format_tokens_short(total))
+                        .style(Style::default().fg(bar_color))
+                }
+                ChartView::Cost => {
+                    let cost = app.daily_cost_vec[i].1;
+                    // BarChart needs an integer value; render cost in cents.
+                    let cents = (cost * 100.0).round().max(0.0) as u64;
+                    Bar::default()
+                        .value(cents)
+                        .label(Line::from(label))
+                        .text_value(format_cost_short(cost))
+                        .style(Style::default().fg(bar_color))
+                }
+            }
         })
         .collect();
 
     let title = if app.daily_vec.len() > visible {
         format!(
-            " Tokens per Day [{}-{}/{}] ",
+            " {} [{}-{}/{}]  (c: toggle) ",
+            base_title,
             start + 1,
             end,
             app.daily_vec.len()
         )
     } else {
-        " Tokens per Day ".to_string()
+        format!(" {}  (c: toggle) ", base_title)
     };
 
     let chart = BarChart::default()
@@ -191,8 +238,8 @@ fn render_token_chart(frame: &mut Frame, area: Rect, app: &App) {
         .data(BarGroup::default().bars(&bars))
         .bar_width(7)
         .bar_gap(1)
-        .bar_style(Style::default().fg(Color::Cyan))
-        .value_style(Style::default().fg(Color::Black).bg(Color::Cyan).bold());
+        .bar_style(Style::default().fg(bar_color))
+        .value_style(Style::default().fg(Color::Black).bg(bar_color).bold());
 
     frame.render_widget(chart, area);
 }
@@ -615,6 +662,40 @@ fn render_cost(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Green).bold(),
         ),
     ]));
+
+    // Daily cost stats: average across active days, plus last-7-days sum.
+    let active_days = app.daily_cost_vec.iter().filter(|(_, c)| *c > 0.0).count();
+    let daily_avg = if active_days > 0 {
+        total_cost / active_days as f64
+    } else {
+        0.0
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Daily avg    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("${:.2}", daily_avg),
+            Style::default().fg(Color::White).bold(),
+        ),
+    ]));
+
+    let last_7_total: f64 = if let Some((most_recent, _)) = app.daily_cost_vec.last() {
+        let cutoff = *most_recent - chrono::Duration::days(6);
+        app.daily_cost_vec
+            .iter()
+            .rev()
+            .take_while(|(d, _)| *d >= cutoff)
+            .map(|(_, c)| *c)
+            .sum()
+    } else {
+        0.0
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Last 7 days  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("${:.2}", last_7_total),
+            Style::default().fg(Color::White).bold(),
+        ),
+    ]));
     lines.push(Line::from(""));
 
     // Per-model breakdown
@@ -702,6 +783,16 @@ fn model_prices(model: &str) -> (f64, f64, f64, f64) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn format_cost_short(cost: f64) -> String {
+    if cost >= 100.0 {
+        format!("${:.0}", cost)
+    } else if cost >= 1.0 {
+        format!("${:.1}", cost)
+    } else {
+        format!("${:.2}", cost)
+    }
+}
 
 fn format_tokens_short(total: u64) -> String {
     if total >= 100_000_000 {

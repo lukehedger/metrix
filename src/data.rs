@@ -103,6 +103,8 @@ pub struct Metrics {
     pub total_assistant_turns: u32,
     /// Per-model token totals for cost estimation
     pub model_tokens: BTreeMap<String, ModelTokens>,
+    /// Per-day per-model token totals (for accurate daily cost estimates)
+    pub daily_model_tokens: BTreeMap<NaiveDate, BTreeMap<String, ModelTokens>>,
 }
 
 #[derive(Default, Clone)]
@@ -145,6 +147,8 @@ pub fn parse_all(files: &[PathBuf]) -> Metrics {
     let mut total_user_turns: u32 = 0;
     let mut total_assistant_turns: u32 = 0;
     let mut model_tokens: BTreeMap<String, ModelTokens> = BTreeMap::new();
+    let mut daily_model_tokens: BTreeMap<NaiveDate, BTreeMap<String, ModelTokens>> =
+        BTreeMap::new();
 
     // Track which files have been written (to distinguish create vs edit)
     let mut written_files: HashMap<String, u64> = HashMap::new();
@@ -218,11 +222,25 @@ pub fn parse_all(files: &[PathBuf]) -> Metrics {
                         if let Some(ref model) = message.model {
                             let model_key = normalize_model(model);
                             if !model_key.is_empty() {
-                                let mt = model_tokens.entry(model_key).or_default();
+                                let mt = model_tokens.entry(model_key.clone()).or_default();
                                 mt.input += usage.input_tokens.unwrap_or(0);
                                 mt.output += usage.output_tokens.unwrap_or(0);
                                 mt.cache_read += usage.cache_read_input_tokens.unwrap_or(0);
                                 mt.cache_creation += usage.cache_creation_input_tokens.unwrap_or(0);
+
+                                // Per-day per-model tracking
+                                if let Some(date) = ts_date {
+                                    let dmt = daily_model_tokens
+                                        .entry(date)
+                                        .or_default()
+                                        .entry(model_key)
+                                        .or_default();
+                                    dmt.input += usage.input_tokens.unwrap_or(0);
+                                    dmt.output += usage.output_tokens.unwrap_or(0);
+                                    dmt.cache_read += usage.cache_read_input_tokens.unwrap_or(0);
+                                    dmt.cache_creation +=
+                                        usage.cache_creation_input_tokens.unwrap_or(0);
+                                }
                             }
                         }
                     }
@@ -353,7 +371,16 @@ pub fn parse_all(files: &[PathBuf]) -> Metrics {
         total_user_turns,
         total_assistant_turns,
         model_tokens,
+        daily_model_tokens,
     }
+}
+
+/// Sum cost across all models for a given day's token totals.
+pub fn estimate_daily_cost(day_models: &BTreeMap<String, ModelTokens>) -> f64 {
+    day_models
+        .iter()
+        .map(|(model, tokens)| estimate_cost(model, tokens))
+        .sum()
 }
 
 // ---------------------------------------------------------------------------

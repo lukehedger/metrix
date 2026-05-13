@@ -46,6 +46,7 @@ fn main() -> Result<()> {
                     KeyCode::Left | KeyCode::Char('h') => app.scroll_left(visible),
                     KeyCode::Home => app.scroll_offset = 0,
                     KeyCode::End => app.scroll_to_end(visible),
+                    KeyCode::Char('c') => app.toggle_chart_view(),
                     _ => {}
                 }
             }
