@@ -4,6 +4,8 @@ A TUI dashboard for Claude Code usage metrics, built with [ratatui](https://rata
 
 Parses session data from `~/.claude/projects/` to display token usage, tool calls, file operations, session records, conversation stats, and estimated cost.
 
+![Image](https://github.com/user-attachments/assets/d9c2763a-14f8-44e8-baab-c2d6fcda612e)
+
 ## Run
 
 ```sh
